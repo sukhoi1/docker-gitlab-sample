@@ -1,3 +1,6 @@
 .vs/
 GitLabDeploy/obj/
 gitlab.git/
+ConsoleApp1/bin/
+ConsoleApp1/obj/
+GitLabDeploy/bin/
