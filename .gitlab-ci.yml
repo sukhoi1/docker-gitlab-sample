@@ -12,27 +12,24 @@ variables: # all jobs in the pipeline can access $QA_URL and $PROD_URL
 vars-job:
   image: ubuntu:22.04
   stage: vars
-  except:
-    - tags
-  script:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: on_success
+    - when: never
+  before_script:
     - apt update && apt install -y curl jq
+  script:
     - echo "ENV variable from GitLab API:"
-    # - |
-    #   ENV_VALUE=$(curl --header "PRIVATE-TOKEN: glpat-aqS1YsoTct5iZOPcijP6Fm86MQp1OjEH.01.0w16r041e" "http://host.docker.internal/api/v4/projects/1/variables/ENV")
-    # - |
-    #   echo "ENV_VALUE=$ENV_VALUE"
-    - echo "MINOR_VERSION=$VERSION"
+    - echo "CI_COMMIT_BRANCH=$CI_COMMIT_BRANCH"
+    - echo "VAL_BEFORE=$VERSION"
+    - VERSION=$((VERSION + 1))
+    - echo "VAL_AFTER=$VERSION"
+    
+    - echo "MINOR_VERSION_VAL=$VERSION"
+    - echo "MINOR_VERSION_VAL=$VERSION" >> variables.env # <-- reuse variables in two jobs
     - |
-      VAL=$(curl --header "PRIVATE-TOKEN: $ACCESS_TOKEN" "http://host.docker.internal/api/v4/projects/$CI_PROJECT_ID/variables/VERSION" | jq -r '.value')
-    - echo "VERSION=$VAL"
-    - VAL=$((VAL + 1))
-    - MINOR_VERSION_VAL=$((VAL + 1))
-    - echo "VERSION=$VAL"                                          # <-- reuse variables in two jobs
-    - echo "MINOR_VERSION_VAL=$MINOR_VERSION_VAL" >> variables.env # <-- reuse variables in two jobs
-    - echo "VERSION=$VAL" >> variables.env                         # <-- reuse variables in two jobs
-    - |
-      curl --header "PRIVATE-TOKEN: $ACCESS_TOKEN" --request PUT "http://host.docker.internal/api/v4/projects/$CI_PROJECT_ID/variables/VERSION" --data "{ \"value\": $VAL }" --header "Content-Type: application/json"
-  allow_failure: true
+      curl --header "PRIVATE-TOKEN: $ACCESS_TOKEN" --request PUT "http://host.docker.internal/api/v4/projects/$CI_PROJECT_ID/variables/VERSION" --data "{ \"value\": $VERSION }" --header "Content-Type: application/json"
+  allow_failure: false
   artifacts:                  # <-- reuse variables in two jobs
     reports:                  # <-- reuse variables in two jobs
       dotenv: variables.env   # <-- reuse variables in two jobs
@@ -40,21 +37,41 @@ vars-job:
 build-job:
   image: mcr.microsoft.com/dotnet/sdk:8.0
   stage: build
-  except:
-    - tags
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: on_success
+    - when: never
   needs: [vars-job]
-  script:
+  before_script:
     - apt-get update && apt-get install -y lftp
+  script:
     - echo "VERSION=$MINOR_VERSION_VAL"
+
+    # generate dlls
     - dotnet publish "GitLabDeploy/WebApplication1.csproj" -c Release -o publish/ -p:Version="1.0.0.$MINOR_VERSION_VAL"
-    - lftp -u $FTP_USER,$FTP_PASSWORD $FTP_SERVER -e "mirror -R --only-newer publish/ sample.lyhin.com/; bye"
-  allow_failure: true
+
+    # pre-script: reboot app-pool
+    - echo "Creating app_offline.htm..."
+    - echo "<!DOCTYPE html><html><head><title>Site Updating</title></head><body><h1>Site is updating, please wait...</h1></body></html>" > app_offline.htm
+    - echo "Uploading app_offline.htm to take the site offline..."
+    - lftp -u "$FTP_USER","$FTP_PASSWORD" "$FTP_SERVER" -e "put app_offline.htm -o $FTP_FOLDER/app_offline.htm; bye"
+
+    # dll upload
+    - echo "Uploading dlls..."
+    - lftp -u "$FTP_USER","$FTP_PASSWORD" "$FTP_SERVER" -e "mirror -R publish/ "$FTP_FOLDER/"; bye"
+
+    # after-script: reboot app-pool
+    - echo "Removing app_offline.htm to bring the site back online..."
+    - lftp -u "$FTP_USER","$FTP_PASSWORD" "$FTP_SERVER" -e "rm $FTP_FOLDER/app_offline.htm; bye"
+
+  allow_failure: false
 
 
 # deploy_A_dev-job:
 #   stage: deploy
-#   except:
-#     - tags
+# rules:
+#   - if: '$CI_COMMIT_BRANCH == "develop"'
+#     when: always#   - when: never
 #   environment:
 #     name: dev
 #     url: http://dev.lyhin.com
@@ -66,9 +83,12 @@ build-job:
 #   allow_failure: true
 
 # deploy_B_qa-job:
-#   stage: deploy
-#   except:
-#     - tags
+# rules:
+#   - if: '$CI_COMMIT_BRANCH == "develop"'
+#     when: always
+#   - when: never
+#  only:
+#    - develop
 #   environment:
 #     name: qa
 #     url: http://qa.lyhin.com
@@ -96,8 +116,10 @@ build-job:
 
 tag-job:
   stage: tag
-  except:
-    - tags
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: on_success
+    - when: never
   needs: [vars-job, build-job]   # <-- reuse variables in two jobs
   before_script:
     - apk add --no-cache git
@@ -106,9 +128,9 @@ tag-job:
   script:
     - echo "VERSION=$MINOR_VERSION_VAL"
     - git remote set-url origin http://gitlab-ci-token:glpat-yrMpc3CHRZkfQ3TcvN79Zm86MQp1OjEH.01.0w17obilk@host.docker.internal/root/sample-1.git
-    - git fetch origin main
-    - git checkout main
-    - git reset --hard origin/main
+    - git fetch origin develop
+    - git checkout develop
+    - git reset --hard origin/develop
     - git tag "v1.0.0.$MINOR_VERSION_VAL"
     - git push origin "v1.0.0.$MINOR_VERSION_VAL" 
-  allow_failure: true
+  allow_failure: false
